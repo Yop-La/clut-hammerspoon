@@ -1,20 +1,21 @@
 # clut-hammerspoon
 
-Basculer entre les derniers onglets Chrome utilisés au clavier, comme l'extension
-[CLUT](https://chromewebstore.google.com/detail/clut-cycle-last-used-tabs/cobieddmkhhnbeldhncnfcgcaccmehgn),
-mais **sans extension** : utile sur un profil Chrome géré par une organisation
-qui interdit les extensions. Tourne sur macOS via [Hammerspoon](https://www.hammerspoon.org).
+Switch between your most recently used Chrome tabs from the keyboard, like the
+[CLUT](https://chromewebstore.google.com/detail/clut-cycle-last-used-tabs/cobieddmkhhnbeldhncnfcgcaccmehgn)
+extension, but **without any extension**: handy on a Chrome profile managed by
+an organization that blocks extensions. Runs on macOS with
+[Hammerspoon](https://www.hammerspoon.org).
 
-Bonus par rapport à CLUT : l'historique est **commun à toutes les fenêtres et à
-tous les profils Chrome**.
+Bonus over CLUT: the history is **shared across all Chrome windows and
+profiles**.
 
-| Raccourci | Action |
+| Shortcut | Action |
 |---|---|
-| `⌥W` | Bascule entre les 2 derniers onglets |
-| `⌥S` | Remonte l'historique : garder `⌥` enfoncé, appuyer plusieurs fois sur `S`, relâcher `⌥` pour valider |
-| `⌥⇧S` | Même chose dans l'autre sens |
+| `⌥W` | Toggle between the last 2 tabs |
+| `⌥S` | Go back through history: hold `⌥`, press `S` repeatedly, release `⌥` to confirm |
+| `⌥⇧S` | Same, in the other direction |
 
-Les raccourcis ne sont actifs que lorsque Chrome est au premier plan.
+Shortcuts are only active while Chrome is the frontmost app.
 
 ## Installation
 
@@ -24,50 +25,48 @@ git clone https://github.com/Yop-La/clut-hammerspoon.git ~/clut-hammerspoon
 mkdir -p ~/.hammerspoon
 ln -s ~/clut-hammerspoon/clut.lua ~/.hammerspoon/clut.lua
 cat >> ~/.hammerspoon/init.lua <<'EOF'
-hs.autoLaunch(true)       -- démarrage à l'ouverture de session
+hs.autoLaunch(true)       -- start at login
 clut = require("clut")
 clut.start()
 EOF
 open -a Hammerspoon
 ```
 
-Puis, une seule fois :
+Then, once:
 
-1. Au premier lancement, cliquer **Ouvrir** sur l'avertissement macOS.
-2. **Réglages Système → Confidentialité et sécurité → Accessibilité** : cocher
-   Hammerspoon, puis **quitter et relancer Hammerspoon** (il ne voit
-   l'autorisation qu'après un redémarrage).
-3. Au premier `⌥W`, accepter que Hammerspoon **contrôle Google Chrome**.
+1. On first launch, click **Open** on the macOS warning.
+2. **System Settings → Privacy & Security → Accessibility**: enable
+   Hammerspoon, then **quit and relaunch Hammerspoon** (it only picks up the
+   permission after a restart).
+3. On the first `⌥W`, allow Hammerspoon to **control Google Chrome**.
 
-Mise à jour : `git -C ~/clut-hammerspoon pull`, puis *Reload Config* dans le
-menu Hammerspoon.
+Update: `git -C ~/clut-hammerspoon pull`, then *Reload Config* from the
+Hammerspoon menu.
 
 ## Configuration
 
-Constantes en tête de `clut.lua` : taille de l'historique (`MAX_HISTORY`),
-bandeau pendant `⌥S` (`SHOW_HUD`). Les raccourcis sont définis dans `M.start()`.
+Constants at the top of `clut.lua`: history size (`MAX_HISTORY`), overlay while
+cycling with `⌥S` (`SHOW_HUD`). Shortcuts are defined in `M.start()`.
 
-## Fonctionnement
+## How it works
 
-Hammerspoon suit l'onglet actif (changement de titre de fenêtre + sondage léger
-quand Chrome est devant), tient une liste des onglets les plus récents et
-active l'onglet visé via AppleScript, qui voit toutes les fenêtres de Chrome,
-quel que soit le profil.
+Hammerspoon tracks the active tab (window title changes + light polling while
+Chrome is frontmost), keeps a most-recently-used list, and activates the target
+tab through AppleScript, which sees every Chrome window regardless of profile.
 
-## Dépannage
+## Troubleshooting
 
-- `hs -c "return clut.dump()"` affiche l'historique avec les titres
-  (CLI : `/Applications/Hammerspoon.app/Contents/Frameworks/hs/hs`).
-- Le focus clavier reste sur la mauvaise fenêtre → autorisation Accessibilité
-  manquante, ou Hammerspoon pas relancé après l'avoir accordée.
+- `hs -c "return clut.dump()"` prints the history with tab titles
+  (CLI: `/Applications/Hammerspoon.app/Contents/Frameworks/hs/hs`).
+- Keyboard focus stays on the wrong window → Accessibility permission missing,
+  or Hammerspoon not relaunched after granting it.
 
-## Limites
+## Limitations
 
-- Google Chrome uniquement (un seul processus Chrome ; les instances lancées
-  avec `--user-data-dir` à part ne sont pas vues).
-- L'historique se remplit au fil de la navigation et repart à zéro quand Chrome
-  redémarre.
+- Google Chrome only (single Chrome process; separate instances started with
+  `--user-data-dir` are not seen).
+- History builds up as you browse and resets when Chrome restarts.
 
-## Licence
+## License
 
 MIT

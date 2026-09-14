@@ -1,27 +1,27 @@
--- CLUT maison : bascule entre les derniers onglets Chrome utilisés,
--- toutes fenêtres et tous profils confondus (sans extension Chrome).
+-- CLUT without an extension: switch between the most recently used Chrome
+-- tabs, across all windows and profiles.
 --
---   ⌥W   : bascule entre les 2 derniers onglets
---   ⌥S   : remonte l'historique (garder ⌥ enfoncé, appuyer plusieurs fois
---          sur S ; relâcher ⌥ valide l'onglet choisi)
---   ⌥⇧S  : même chose dans l'autre sens
+--   ⌥W   : toggle between the last 2 tabs
+--   ⌥S   : go back through history (hold ⌥, press S repeatedly;
+--          releasing ⌥ confirms the selected tab)
+--   ⌥⇧S  : same, in the other direction
 --
--- Les raccourcis ne sont actifs que lorsque Chrome est au premier plan.
+-- Shortcuts are only active while Chrome is the frontmost app.
 
 local M = {}
 
 local BUNDLE = "com.google.Chrome"
 local APP = "Google Chrome"
 local MAX_HISTORY = 100
-local POLL_INTERVAL = 0.5   -- filet de sécurité quand Chrome est au premier plan
-local SHOW_HUD = true       -- affiche l'onglet visé pendant ⌥S
+local POLL_INTERVAL = 0.5   -- safety net while Chrome is frontmost
+local SHOW_HUD = true       -- show the target tab while cycling with ⌥S
 local SETTINGS_KEY = "clut.mru"
 
-M.mru = {}        -- ids d'onglets, [1] = onglet courant
-M.cycling = nil   -- { list, pos } pendant un cycle ⌥S
+M.mru = {}        -- tab ids, [1] = current tab
+M.cycling = nil   -- { list, pos } during a ⌥S cycle
 
 -- ---------------------------------------------------------------------------
--- Accès à Chrome (AppleScript)
+-- Chrome access (AppleScript)
 -- ---------------------------------------------------------------------------
 
 local function toId(v)
@@ -38,7 +38,7 @@ local function chromeFront()
     return app ~= nil and app:bundleID() == BUNDLE
 end
 
--- Ne jamais appeler si Chrome n'est pas lancé : « tell » le démarrerait.
+-- Never call when Chrome is not running: "tell" would launch it.
 local function tell(body)
     local ok, res = hs.osascript.applescript(
         'tell application "' .. APP .. '"\n' .. body .. '\nend tell')
@@ -52,7 +52,7 @@ if (count of windows) is 0 then return ""
 return (id of active tab of front window) as text]]))
 end
 
--- Ensemble des ids d'onglets ouverts, ou nil si la requête échoue.
+-- Set of open tab ids, or nil if the query fails.
 local function openTabSet()
     local r = tell("return id of every tab of every window")
     if type(r) ~= "table" then return nil end
@@ -71,9 +71,9 @@ local function openTabSet()
     return set
 end
 
--- Donne le focus clavier à la fenêtre Chrome qui vient d'être mise devant.
--- Plusieurs fenêtres peuvent avoir le même cadre (maximisées) : on préfère
--- celle dont le titre correspond, sinon la plus en avant.
+-- Give keyboard focus to the Chrome window that was just brought forward.
+-- Several windows can share the same frame (maximized): prefer the one whose
+-- title matches, otherwise the frontmost one.
 local function focusWindow(title, x, y)
     local app = hs.application.get(BUNDLE)
     if not app then return end
@@ -98,8 +98,9 @@ local function focusWindow(title, x, y)
     end
 end
 
--- Active l'onglet et ramène sa fenêtre devant. Renvoie son titre, ou nil si
--- l'onglet n'existe plus.
+-- Activate the tab and bring its window forward. Returns the tab title, or nil
+-- if the tab no longer exists. Chrome returns tab ids as text, hence the
+-- string comparison.
 local function activateTab(id)
     local r = tell(string.format([[
 repeat with w in (every window)
@@ -128,7 +129,7 @@ return ""]], id))
 end
 
 -- ---------------------------------------------------------------------------
--- Historique
+-- History
 -- ---------------------------------------------------------------------------
 
 local function save()
@@ -154,7 +155,7 @@ function M.refresh()
     record(activeTabId())
 end
 
--- Retire de l'historique les onglets fermés.
+-- Drop closed tabs from the history.
 function M.prune()
     if not chromeRunning() then return end
     local open = openTabSet()
@@ -214,7 +215,7 @@ function M.cycle(dir)
         M.prune()
         if #M.mru < 2 then return end
         M.cycling = { list = { table.unpack(M.mru) }, pos = 1 }
-        -- Relâcher ⌥ valide le choix (pas besoin d'event tap pour ça).
+        -- Releasing ⌥ confirms the choice (no event tap needed for that).
         M.modTimer = hs.timer.doEvery(0.05, function()
             if not hs.eventtap.checkKeyboardModifiers().alt then M.commit() end
         end)
@@ -230,15 +231,15 @@ function M.cycle(dir)
             hud(string.format("↶ %d/%d   %s", pos - 1, n - 1, title))
             return
         end
-        -- Onglet fermé entre-temps : on le retire et on réessaie.
+        -- Tab closed in the meantime: drop it and try the next one.
         table.remove(c.list, pos)
         if pos < c.pos then c.pos = c.pos - 1 end
     end
 end
 
--- Pour le débogage : `hs -c "clut.dump()"`.
+-- For debugging: `hs -c "return clut.dump()"`.
 function M.dump()
-    if not chromeRunning() then return "Chrome n'est pas lancé" end
+    if not chromeRunning() then return "Chrome is not running" end
     local r = tell([[
 set out to ""
 repeat with w in (every window)
@@ -255,13 +256,13 @@ return out]])
     local lines = {}
     for i, id in ipairs(M.mru) do
         table.insert(lines, string.format("%2d. [%d] %s", i, id,
-            titles[id] or "(fermé)"))
+            titles[id] or "(closed)"))
     end
     return table.concat(lines, "\n")
 end
 
 -- ---------------------------------------------------------------------------
--- Démarrage
+-- Startup
 -- ---------------------------------------------------------------------------
 
 local function setChromeFront(front)
@@ -308,7 +309,7 @@ function M.start()
     end)
     M.appWatcher:start()
 
-    -- Changement d'onglet = changement de titre de fenêtre : réaction immédiate.
+    -- A tab switch changes the window title: react immediately.
     M.windowFilter = hs.window.filter.new(false):setAppFilter(APP)
     M.windowFilter:subscribe({
         hs.window.filter.windowFocused,
