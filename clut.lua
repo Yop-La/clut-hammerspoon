@@ -19,6 +19,11 @@ local SETTINGS_KEY = "clut.mru"
 
 M.mru = {}        -- tab ids, [1] = current tab
 M.cycling = nil   -- { list, pos } during a ⌥S cycle
+M.debug = false   -- set to true to trace shortcuts in the Hammerspoon console
+
+local function log(fmt, ...)
+    if M.debug then print("[clut] " .. string.format(fmt, ...)) end
+end
 
 -- ---------------------------------------------------------------------------
 -- Chrome access (AppleScript)
@@ -46,7 +51,28 @@ local function tell(body)
     return res
 end
 
+-- Id of the tab the user is actually looking at. AppleScript's "front window"
+-- is not reliable: a stray window (an off-screen popup, a leftover one-tab
+-- window) can sit at index 1 forever and make us track the wrong tab. So the
+-- window focused according to macOS wins, matched by frame; "front window" is
+-- only the fallback when Accessibility gives us nothing.
 local function activeTabId()
+    local win = hs.window.focusedWindow()
+    local app = hs.application.get(BUNDLE)
+    if win and app and win:application() and win:application():pid() == app:pid() then
+        local f = win:frame()
+        local r = tell(string.format([[
+repeat with w in (every window)
+    set b to bounds of w
+    if ((item 1 of b) > %d) and ((item 1 of b) < %d) and ¬
+       ((item 2 of b) > %d) and ((item 2 of b) < %d) then
+        return (id of active tab of w) as text
+    end if
+end repeat
+return ""]], f.x - 5, f.x + 5, f.y - 5, f.y + 5))
+        local id = toId(r)
+        if id then return id end
+    end
     return toId(tell([[
 if (count of windows) is 0 then return ""
 return (id of active tab of front window) as text]]))
@@ -72,29 +98,28 @@ local function openTabSet()
 end
 
 -- Give keyboard focus to the Chrome window that was just brought forward.
--- Several windows can share the same frame (maximized): prefer the one whose
--- title matches, otherwise the frontmost one.
+-- Only Chrome's own windows are queried: hs.window.orderedWindows() walks
+-- every running app and can stall for seconds if one of them is slow.
+-- Several windows can share the same frame (maximized), so a matching title
+-- wins over a matching frame.
 local function focusWindow(title, x, y)
     local app = hs.application.get(BUNDLE)
     if not app then return end
-    local pid = app:pid()
-    local best
-    for _, w in ipairs(hs.window.orderedWindows()) do
-        local wapp = w:application()
-        if wapp and wapp:pid() == pid then
-            local f = w:frame()
-            if math.abs(f.x - x) < 4 and math.abs(f.y - y) < 4 then
-                if w:title() == title then
-                    best = w
-                    break
-                end
-                best = best or w
+    local exact, sameFrame
+    for _, w in ipairs(app:allWindows()) do
+        local f = w:frame()
+        if math.abs(f.x - x) < 4 and math.abs(f.y - y) < 4 then
+            if w:title() == title then
+                exact = exact or w
+            else
+                sameFrame = sameFrame or w
             end
         end
     end
+    local target = exact or sameFrame
     local focused = hs.window.focusedWindow()
-    if best and (not focused or focused:id() ~= best:id()) then
-        best:focus()
+    if target and (not focused or focused:id() ~= target:id()) then
+        target:focus()
     end
 end
 
@@ -150,8 +175,23 @@ local function record(id)
     save()
 end
 
-function M.refresh()
+-- Cheap AX check first: only ask Chrome (AppleScript, and Chrome can be slow
+-- to answer when busy) when the focused window or its title actually changed.
+local lastSeen = {}
+
+function M.refresh(force)
     if M.cycling or not chromeRunning() then return end
+    if not force then
+        local win = hs.window.focusedWindow()
+        local app = hs.application.get(BUNDLE)
+        if not (win and app and win:application()
+                and win:application():pid() == app:pid()) then
+            return
+        end
+        local id, title = win:id(), win:title()
+        if lastSeen.win == id and lastSeen.title == title then return end
+        lastSeen.win, lastSeen.title = id, title
+    end
     record(activeTabId())
 end
 
@@ -180,18 +220,22 @@ end
 -- ---------------------------------------------------------------------------
 
 function M.toggle()
+    log("toggle pressed")
     if not chromeRunning() then return end
     if M.cycling then M.commit() end
-    M.refresh()
+    M.refresh(true)
     M.prune()
     while #M.mru >= 2 do
         local id = M.mru[2]
-        if activateTab(id) then
+        local title = activateTab(id)
+        log("toggle -> %d (%s)", id, title or "not found")
+        if title then
             record(id)
             return
         end
         table.remove(M.mru, 2)
     end
+    log("toggle: nothing to switch to (history: %d)", #M.mru)
 end
 
 function M.commit()
@@ -209,9 +253,10 @@ function M.commit()
 end
 
 function M.cycle(dir)
+    log("cycle pressed (dir=%d)", dir)
     if not chromeRunning() then return end
     if not M.cycling then
-        M.refresh()
+        M.refresh(true)
         M.prune()
         if #M.mru < 2 then return end
         M.cycling = { list = { table.unpack(M.mru) }, pos = 1 }
@@ -226,6 +271,7 @@ function M.cycle(dir)
         if n < 2 then break end
         local pos = ((c.pos - 1 + dir) % n) + 1
         local title = activateTab(c.list[pos])
+        log("cycle -> %d/%d %s", pos - 1, n - 1, title or "not found")
         if title then
             c.pos = pos
             hud(string.format("↶ %d/%d   %s", pos - 1, n - 1, title))
@@ -271,7 +317,7 @@ local function setChromeFront(front)
     end
     if front then
         M.poll:start()
-        M.refresh()
+        M.refresh(true)
     else
         M.poll:stop()
         if M.cycling then M.commit() end
