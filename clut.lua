@@ -26,12 +26,24 @@ local function log(fmt, ...)
 end
 
 -- ---------------------------------------------------------------------------
--- Chrome access (AppleScript)
+-- Chrome access (AppleScript, or JXA by pid when several instances run)
 -- ---------------------------------------------------------------------------
 
 local function toId(v)
     local n = tonumber(v)
     return n and math.tointeger(n) or nil
+end
+
+-- The Chrome instance the user works in. Other instances (headless ones
+-- started by scripts and browser-driving agents with --headless /
+-- --user-data-dir) share the bundle id and have no windows, so the one with
+-- windows wins.
+local function chromeApp(apps)
+    apps = apps or hs.application.applicationsForBundleID(BUNDLE)
+    for _, app in ipairs(apps) do
+        if #app:allWindows() > 0 then return app end
+    end
+    return apps[1]
 end
 
 local function chromeRunning()
@@ -43,6 +55,17 @@ local function chromeFront()
     return app ~= nil and app:bundleID() == BUNDLE
 end
 
+-- Focused Chrome window according to Accessibility, or nil. Chrome sometimes
+-- reports no focused window at all even when frontmost.
+local function focusedChromeWindow()
+    local win = hs.window.focusedWindow()
+    if win and win:application() and win:application():bundleID() == BUNDLE then
+        return win
+    end
+    local app = chromeApp()
+    return app and (app:focusedWindow() or app:mainWindow()) or nil
+end
+
 -- Never call when Chrome is not running: "tell" would launch it.
 local function tell(body)
     local ok, res = hs.osascript.applescript(
@@ -51,17 +74,53 @@ local function tell(body)
     return res
 end
 
+-- Helpers available to every JXA body. Windows come in front-to-back order.
+local JXA_PRELUDE = [[
+ObjC.import("ScriptingBridge");
+var app = $.SBApplication.applicationWithProcessIdentifier(%d);
+function get(o, k) { return ObjC.unwrap(o.valueForKey(k)); }
+function windows() {
+    var a = app.valueForKey("windows"), r = [];
+    for (var i = 0; i < a.count; i++) r.push(a.objectAtIndex(i));
+    return r;
+}
+function byId(wid) { return app.valueForKey("windows").objectWithID(wid); }
+function origin(w) { return w.valueForKey("bounds").rectValue.origin; }
+function tabsOf(w, k) { return ObjC.deepUnwrap(w.valueForKey("tabs").valueForKey(k)); }
+function activeTabId(w) { return String(get(w.valueForKey("activeTab"), "id")); }
+]]
+
+local function shellQuote(s)
+    return "'" .. s:gsub("'", "'\\''") .. "'"
+end
+
+-- Run a query against the user's Chrome. "tell application" cannot choose
+-- between instances and may talk to a headless one, so as soon as several
+-- are running the JXA variant addresses the right one by pid, in a separate
+-- osascript process (~0.2 s; ScriptingBridge inside Hammerspoon hangs).
+local function chrome(applescript, jxa)
+    local apps = hs.application.applicationsForBundleID(BUNDLE)
+    if #apps <= 1 then return tell(applescript) end
+    local app = chromeApp(apps)
+    if not app then return nil end
+    local js = string.format(JXA_PRELUDE, app:pid())
+        .. "(function () {\n" .. jxa .. "\n})();"
+    local out, ok = hs.execute("/usr/bin/osascript -l JavaScript -e " .. shellQuote(js))
+    if not ok then return nil end
+    return (out:gsub("\n$", ""))
+end
+
 -- Id of the tab the user is actually looking at. AppleScript's "front window"
 -- is not reliable: a stray window (an off-screen popup, a leftover one-tab
 -- window) can sit at index 1 forever and make us track the wrong tab. So the
 -- window focused according to macOS wins, matched by frame; "front window" is
 -- only the fallback when Accessibility gives us nothing.
 local function activeTabId()
-    local win = hs.window.focusedWindow()
-    local app = hs.application.get(BUNDLE)
-    if win and app and win:application() and win:application():pid() == app:pid() then
+    local win = focusedChromeWindow()
+    if win then
         local f = win:frame()
-        local r = tell(string.format([[
+        local x0, x1, y0, y1 = f.x - 5, f.x + 5, f.y - 5, f.y + 5
+        local r = chrome(string.format([[
 repeat with w in (every window)
     set b to bounds of w
     if ((item 1 of b) > %d) and ((item 1 of b) < %d) and ¬
@@ -69,20 +128,33 @@ repeat with w in (every window)
         return (id of active tab of w) as text
     end if
 end repeat
-return ""]], f.x - 5, f.x + 5, f.y - 5, f.y + 5))
+return ""]], x0, x1, y0, y1), string.format([[
+var ws = windows();
+for (var i = 0; i < ws.length; i++) {
+    var o = origin(ws[i]);
+    if (o.x > %d && o.x < %d && o.y > %d && o.y < %d) return activeTabId(ws[i]);
+}
+return "";]], x0, x1, y0, y1))
         local id = toId(r)
         if id then return id end
     end
-    return toId(tell([[
+    return toId(chrome([[
 if (count of windows) is 0 then return ""
-return (id of active tab of front window) as text]]))
+return (id of active tab of front window) as text]], [[
+var ws = windows();
+return ws.length ? activeTabId(ws[0]) : "";]]))
 end
 
 -- Set of open tab ids, or nil if the query fails.
 local function openTabSet()
-    local r = tell("return id of every tab of every window")
-    if type(r) ~= "table" then return nil end
+    local r = chrome("return id of every tab of every window", [[
+return windows().map(function (w) { return tabsOf(w, "id").join(","); }).join(",");]])
     local set = {}
+    if type(r) == "string" then
+        for id in r:gmatch("%d+") do set[toId(id)] = true end
+        return set
+    end
+    if type(r) ~= "table" then return nil end
     for _, win in ipairs(r) do
         if type(win) == "table" then
             for _, id in ipairs(win) do
@@ -103,7 +175,7 @@ end
 -- Several windows can share the same frame (maximized), so a matching title
 -- wins over a matching frame.
 local function focusWindow(title, x, y)
-    local app = hs.application.get(BUNDLE)
+    local app = chromeApp()
     if not app then return end
     local exact, sameFrame
     for _, w in ipairs(app:allWindows()) do
@@ -127,7 +199,7 @@ end
 -- if the tab no longer exists. Chrome returns tab ids as text, hence the
 -- string comparison.
 local function activateTab(id)
-    local r = tell(string.format([[
+    local r = chrome(string.format([[
 repeat with w in (every window)
     set ids to id of every tab of w
     repeat with i from 1 to count of ids
@@ -143,7 +215,22 @@ repeat with w in (every window)
         end if
     end repeat
 end repeat
-return ""]], id))
+return ""]], id), string.format([[
+var ws = windows();
+for (var n = 0; n < ws.length; n++) {
+    var i = tabsOf(ws[n], "id").map(String).indexOf("%d");
+    if (i < 0) continue;
+    // Address the window by id: index specifiers shift once it is raised.
+    var w = byId(get(ws[n], "id"));
+    if (get(w, "minimized")) w.setValueForKey(false, "minimized");
+    w.setValueForKey(i + 1, "activeTabIndex");
+    w.setValueForKey(1, "index");
+    app.activate;
+    var o = origin(w);
+    return get(w.valueForKey("activeTab"), "title") + "\t"
+        + Math.round(o.x) + "\t" + Math.round(o.y);
+}
+return "";]], id))
     if type(r) ~= "string" or r == "" then return nil end
     local title, x, y = r:match("^(.*)\t(-?%d+)\t(-?%d+)$")
     if not title then return r end
@@ -177,22 +264,22 @@ end
 
 -- Cheap AX check first: only ask Chrome (AppleScript, and Chrome can be slow
 -- to answer when busy) when the focused window or its title actually changed.
+-- Without an AX window we just ask Chrome (~30 ms) rather than miss the tab.
 local lastSeen = {}
 
 function M.refresh(force)
     if M.cycling or not chromeRunning() then return end
-    if not force then
-        local win = hs.window.focusedWindow()
-        local app = hs.application.get(BUNDLE)
-        if not (win and app and win:application()
-                and win:application():pid() == app:pid()) then
-            return
-        end
-        local id, title = win:id(), win:title()
-        if lastSeen.win == id and lastSeen.title == title then return end
-        lastSeen.win, lastSeen.title = id, title
+    local win = focusedChromeWindow()
+    local key = win and { win = win:id(), title = win:title() }
+    if not force and key and lastSeen.win == key.win
+            and lastSeen.title == key.title then
+        return
     end
-    record(activeTabId())
+    local id = activeTabId()
+    record(id)
+    -- Only remember what we saw once the tab was actually read, so a failed
+    -- query is retried on the next poll.
+    if id and key then lastSeen = key end
 end
 
 -- Drop closed tabs from the history.
@@ -286,14 +373,20 @@ end
 -- For debugging: `hs -c "return clut.dump()"`.
 function M.dump()
     if not chromeRunning() then return "Chrome is not running" end
-    local r = tell([[
+    local r = chrome([[
 set out to ""
 repeat with w in (every window)
     repeat with t in (every tab of w)
         set out to out & ((id of t) as text) & "\t" & (title of t) & linefeed
     end repeat
 end repeat
-return out]])
+return out]], [[
+var out = "";
+windows().forEach(function (w) {
+    var ids = tabsOf(w, "id"), titles = tabsOf(w, "title");
+    for (var i = 0; i < ids.length; i++) out += ids[i] + "\t" + titles[i] + "\n";
+});
+return out;]])
     local titles = {}
     for line in (r or ""):gmatch("[^\n]+") do
         local id, title = line:match("^(%d+)\t(.*)$")
@@ -336,8 +429,8 @@ function M.start()
         hs.hotkey.new({ "alt" }, "s", function() M.cycle(1) end),
         hs.hotkey.new({ "alt", "shift" }, "s", function() M.cycle(-1) end),
     }
-    M.poll = hs.timer.new(POLL_INTERVAL, M.refresh)
-    M.debounced = hs.timer.delayed.new(0.15, M.refresh)
+    M.poll = hs.timer.new(POLL_INTERVAL, function() M.refresh() end)
+    M.debounced = hs.timer.delayed.new(0.15, function() M.refresh() end)
 
     local w = hs.application.watcher
     M.appWatcher = w.new(function(name, event, app)
